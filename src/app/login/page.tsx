@@ -58,8 +58,19 @@ export default function LoginPage() {
   // Get the search parameters from the URL (e.g., "?callbackUrl=/tasks")
   const params = useSearchParams();
 
-  // Read the specific "callbackUrl" parameter, or default to "/tasks" if it's not there.
-  const callbackUrl = params.get("callbackUrl") ?? "/tasks";
+  // `params.get("callbackUrl")` reads the query string, for example `?callbackUrl=/tasks`.
+  // It returns that string, or `null` when the parameter is missing.
+  // This value is not trusted. It comes from the URL, so a link can set it to anything,
+  // including an address on another site.
+  const rawCallbackUrl = params.get("callbackUrl");
+
+  // After a successful login, `router.push(callbackUrl)` sends the browser to this value.
+  // Only a path on this site is allowed:
+  // - `startsWith("/")` keeps absolute URLs like `https://evil.example` out.
+  // - `startsWith("//")` is rejected because a browser treats `//evil.example` as a
+  //   URL on another site, even though the string starts with `/`.
+  // Anything else, including a missing parameter, falls back to `/tasks`.
+  const callbackUrl = rawCallbackUrl?.startsWith("/") && !rawCallbackUrl.startsWith("//") ? rawCallbackUrl : "/tasks";
 
   // 1. `useState({ email: "", password: "" })`: This calls the `useState` hook. We pass it an
   //    initial value: an object with `email` and `password` keys set to empty strings.
