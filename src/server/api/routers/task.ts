@@ -2,6 +2,10 @@
 // related procedures that handle a specific data entity or feature. This file contains
 // all the server-side logic for task-related operations.
 
+// TRPCError is tRPC's error class. A `code` of "NOT_FOUND" becomes an HTTP 404.
+// A plain `throw new Error(...)` would have become a generic 500 instead.
+import { TRPCError } from "@trpc/server";
+
 // Zod is a TypeScript-first schema validation library. In the T3 stack, it's used
 // to define the expected shape and types of the input for your API procedures.
 // This ensures that any data sent from the client to this endpoint is valid before
@@ -11,9 +15,10 @@ import { z } from "zod";
 // These are helper functions from the main tRPC configuration file (/server/api/trpc.ts).
 // - createTRPCRouter is used to create a new router, which is like a container
 //   for a group of related API endpoints (e.g., all endpoints for handling tasks).
-// - publicProcedure is a basic building block for an API endpoint that does NOT
-//   require the user to be authenticated. Anyone can call this endpoint.
-import { createTRPCRouter, publicProcedure } from "../trpc";
+// - protectedProcedure requires the caller to be logged in. If there is no
+//   session it throws UNAUTHORIZED before the resolver runs, and afterwards
+//   ctx.session.user is guaranteed to exist.
+import { createTRPCRouter, protectedProcedure } from "../trpc";
 
   // Here, we're creating and exporting a router specifically for handling "task" operations.
   // This `taskRouter` will be merged into your main `appRouter` so that its endpoints
@@ -25,8 +30,7 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
     // - getAll: This is the name of the procedure. On the frontend, you'll call
     //   this using a hook like api.task.getAll.useQuery().
    
-    // - publicProcedure: Specifies that this endpoint is publicly accessible and doesn't
-    //   require a user to be logged in.
+    // - protectedProcedure: Specifies that this endpoint is protected and requires the user to be authenticated.
    
     // - .query(async ({ ctx }) => { ... }):  This declares it as a data-fetching
     //   operation. The function inside is the "resolver" that runs on the server.
@@ -39,15 +43,16 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
     // - return ctx.db.task.findMany(...): This is where Prisma comes in.
     //   - ctx.db is your Prisma Client instance, providing type-safe access to your database.
     //   - .task directly corresponds to the Task model in your schema.prisma.
-    //   - .findMany() is a Prisma method to retrieve all records from the Task table.
-    //   - { orderBy: { createdAt: "desc" } } is an option passed to findMany to sort
+    //   - .findMany() with `where: { userId }` returns only the signed-in user's tasks.
+    //     The id comes from the server-side session, not from the client.
+    //   - orderBy: { createdAt: "desc" } is an option passed to findMany to sort
     //     the results by the createdAt field in descending order (newest tasks first).
    
     // The data returned by this function is automatically serialized by trpc and sent to the client.
     // tRPC also infers the TypeScript type of this return value (when trpc does this to the entire AppRouter), giving you full
     // end-to-end type safety on the frontend.
-    getAll: publicProcedure.query(async ({ ctx }) => {
-      return ctx.db.task.findMany({ orderBy: { createdAt: "desc" } });
+    getAll: protectedProcedure.query(async ({ ctx }) => {
+      return ctx.db.task.findMany({ where: { userId: ctx.session.user.id }, orderBy: { createdAt: "desc" } });
     }),
 
     // This defines the `create` API endpoint within the `taskRouter`.
@@ -57,9 +62,9 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
     // - `create:`: The name of the procedure. The frontend will use a hook like
     //   `api.task.create.useMutation()` to call this endpoint.
     //
-    // - `publicProcedure`: Again, this specifies that the endpoint is public and
-    //   does not require user authentication.
-    create: publicProcedure
+    // - `protectedProcedure`: Again, this specifies that the endpoint is protected and
+    //    requires the user to be authenticated.
+    create: protectedProcedure
 
       //   - `.input()`: Declares that this procedure expects input data from the client.
       //   - `z.object({...})`: Uses Zod to define the schema for the input. It must be
@@ -89,18 +94,20 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
         //   - `ctx.db.task.create()`: Calls the `create` method on the Prisma `Task` model.
         //   - `{ data: { title: input.title } }`: Provides the data for the new task record.
         //     We set the `title` column to the value we received in the validated `input`.
+        //   - `userId` is set to the user's ID from the server-side session. It is not part of the Zod input,
+        //     so a client cannot choose which user owns the new task.
         //   - Other fields like `id`, `completed`, `createdAt`, and `updatedAt` are handled
         //     automatically by Prisma/the database based on the `@default` rules in the schema.
         //
         // The newly created task object, including its database-generated ID and timestamps,
         // is returned by Prisma, and tRPC then sends it back to the client as the result
         // of the mutation.
-        return ctx.db.task.create({ data: { title: input.title } });
+        return ctx.db.task.create({ data: { title: input.title, userId: ctx.session.user.id } });
       }),
 
 
-    // Defines a new public procedure named 'toggle.
-    toggle: publicProcedure
+    // Defines a new protected procedure named 'toggle.
+    toggle: protectedProcedure
 
       // Specifies that this procedure requires input from the client.
       // Using Zod, it validates that the input is an object containing a string 'id'.
@@ -109,25 +116,29 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
       // Defines this as a mutation (a data-changing operation) and provides the server-side function to run.
       .mutation(async ({ ctx, input }) => {
 
-        // Checks if the task with the provided 'id' exists in the database.
-        const task = await ctx.db.task.findUnique({ where: { id: input.id } });
+        // Both fields are required. Matching on id alone would let any logged-in user
+        // toggle someone else's task.
+        const where = { id: input.id, userId: ctx.session.user.id };
 
-        // If the task doesn't exist, throws an error.
-        if (!task) throw new Error("Task not found");
+        // Find the task by id and user id.
+        const task = await ctx.db.task.findFirst({ where });
+
+        // If the task is not found, throw an error.
+        if (!task) throw new TRPCError({ code: "NOT_FOUND", message: "Task not found" });
 
         // If the task was found, update it in the database. The 'return' sends the updated task back to the client.
         return ctx.db.task.update({
 
-          // Specifies that we want to update the task with the provided 'id'.
-          where: { id: input.id },
+          // Specifies that we want to update the task with the provided 'id' and 'user id'.
+          where,
 
           // Updates the 'completed' field to its opposite value.
           data: { completed: !task.completed },
         });
       }),
 
-    // Defines a new public procedure named 'delete'.
-    delete: publicProcedure
+    // Defines a new protected procedure named 'delete'.
+    delete: protectedProcedure
 
       // Specifies that this procedure requires input from the client.
       // Using Zod, it validates that the input is an object containing a string 'id'.
@@ -136,7 +147,17 @@ import { createTRPCRouter, publicProcedure } from "../trpc";
       // Defines this as a mutation (a data-changing operation) and provides the server-side function to run.
       .mutation(async ({ ctx, input }) => {
 
-        // Deletes the task with the provided 'id' from the database.
-        return ctx.db.task.delete({ where: { id: input.id } });
+        // Both fields are required. Matching on id alone would let any logged-in user
+        // delete someone else's task.
+        const where = { id: input.id, userId: ctx.session.user.id };
+
+        // Find the task by id and user id.
+        const task = await ctx.db.task.findFirst({ where });
+
+        // If the task is not found, throw an error.
+        if (!task) throw new TRPCError({ code: "NOT_FOUND", message: "Task not found" });
+
+        // Delete the task by id and user id.
+        return ctx.db.task.delete({ where });
       }),
   });

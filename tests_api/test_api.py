@@ -26,8 +26,15 @@ def test_get_all_tasks():
     # The result of this request (status code, headers, JSON body, etc.) is stored in the `response` object.
     response = requests.get(f"{BASE_URL}/trpc/task.getAll")
     
-    # This is the assertion. It's a check that must be true for the test to pass.
-    # `response.status_code` contains the HTTP status code returned by the server.
-    # We `assert` that the status code is `200`, which is the standard code for "OK" (a successful request).
-    # If the status code is anything else (e.g., 404 Not Found, 500 Internal Server Error), the test will fail.
-    assert response.status_code == 200
+    # This is the assertion. It is a check that must be true for the test to pass.
+    # `response.status_code` is the HTTP status code the server sent back.
+    #
+    # `task.getAll` is a protected tRPC procedure. `protectedProcedure` checks the
+    # session before the resolver runs, and this request sends no session cookie.
+    # The middleware throws TRPCError with code "UNAUTHORIZED", and tRPC turns that
+    # code into HTTP 401.
+    #
+    # We assert 401, not 200. A 200 would mean the task list was returned to someone
+    # who is not logged in. 404 would mean the route was missing. 500 would mean the
+    # server crashed instead of rejecting the request cleanly.
+    assert response.status_code == 401

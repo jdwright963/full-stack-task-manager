@@ -106,10 +106,13 @@ model Session {
 //   enabling traditional email/password login. NEVER store plain text passwords.
 // - verificationToken: A temporary token for one-time email verification, often used
 //   after a user signs up with a password.
-// - accounts[], sessions[], posts[]: These are "back-relations". They do NOT
-//   create columns in the 'User' table. Instead, they are type-safe shortcuts
-//   for the Prisma Client, allowing you to easily query related data. For example:
-//   `prisma.user.findUnique({ where: { id: "..." }, include: { posts: true } })`.
+// - accounts[], sessions[], tasks[]: These are back-relations. They do NOT create
+//   columns on the User table. They let Prisma load the related rows, for example
+//   `db.user.findUnique({ where: { id }, include: { tasks: true } })`.
+//   `tasks` is the other side of Task.userId: one user has many tasks.
+//   `tasks         Task[]`: Every Task row points back here through Task.userId. Deleting this user
+//   deletes those tasks, because Task.user uses onDelete: Cascade.
+
 model User {
     id            String    @id @default(cuid())
     name          String?
@@ -120,6 +123,7 @@ model User {
     image         String?
     accounts      Account[]
     sessions      Session[]
+    tasks         Task[]
 }
 
 // This model is used by NextAuth for "magic link" email sign-in. When a user
@@ -147,10 +151,23 @@ model VerificationToken {
 // - completed @default(false): A new task will be marked as not completed by default.
 // - createdAt @default(now()) & updatedAt @updatedAt: Standard timestamp fields
 //   that automatically track when a record is created and last modified.
+// - userId: Required foreign key. Every task belongs to exactly one user.
+//   The task router sets it from ctx.session.user.id. The client never sends it.
+//   This is the owner of this task. Required, so a task cannot be saved without a user.
+// - user: The relation to User. onDelete: Cascade means deleting a user deletes
+//   that user's tasks. fields: [userId] is the column on this table, and
+//   references: [id] is User.id. This is a Prisma relation. The database enforces this with a foreign key to User.id.
+// - @@index([userId]): An index on the foreign key. Listing one user's tasks
+//   filters on this column, and the index keeps that lookup from scanning the
+//   whole table. Speeds up `where: { userId }`, which is how each user's task list is loaded.
  model Task {
      id        String   @id @default(cuid())
      title     String
      completed Boolean  @default(false)
      createdAt DateTime @default(now())
      updatedAt DateTime @updatedAt
+     userId    String
+     user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+     @@index([userId])
    }
